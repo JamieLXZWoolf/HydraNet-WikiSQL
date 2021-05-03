@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import utils
+import pickle
 from modeling.base_model import BaseModel
 from modeling.model_factory import create_model
 from featurizer import InputFeature, HydraFeaturizer, SQLDataset
@@ -18,7 +19,26 @@ class HydraEvaluator():
 
         self.eval_data = {}
         for eval_path in config["dev_data_path"].split("|") + config["test_data_path"].split("|"):
-            eval_data = SQLDataset(eval_path, config, hydra_featurizer, True)
+            if "use_content" in config.keys() and config["use_content"] == "True":
+                processed_data_path = eval_path +\
+                    "_{}_{}_{}.pickle".format(
+                        config["base_class"],
+                        config["base_name"],
+                        "filtered" if "filter_content" in config.keys(
+                        ) and config["filter_content"] == "True" else "unfilt"
+                    )
+            else:
+                processed_data_path = eval_path +\
+                    "_{}_{}.pickle".format(
+                        config["base_class"], config["base_name"])
+            if os.path.exists(processed_data_path):
+                eval_data = pickle.load(open(processed_data_path, "rb"))
+                print("Loaded processed data from " + processed_data_path)
+            else:
+                eval_data = SQLDataset(
+                    eval_path, config, hydra_featurizer, True)
+                pickle.dump(eval_data, open(processed_data_path, "wb"))
+                print("Unloaded processed data to " + processed_data_path)
             self.eval_data[os.path.basename(eval_path)] = eval_data
 
             print("Eval Data file {0} loaded, sample num = {1}".format(eval_path, len(eval_data)))
@@ -64,16 +84,20 @@ class HydraEvaluator():
             if ("DEBUG" in self.config or get_sq) and not all_correct:
                 try:
                     true_sq = input_feature.output_SQ()
-                    pred_sq = input_feature.output_SQ(agg=agg, sel=select, conditions=[conditions[w] for w in where])
-                    task_cor_text = "".join([str(cur_acc[k]) for k in items if k in cur_acc])
-                    sq.append([str(cnt), input_feature.question, "|".join([task_cor_text, pred_sq, true_sq])])
+                    pred_sq = input_feature.output_SQ(agg=agg, sel=select, conditions=[
+                                                      conditions[w] for w in where])
+                    task_cor_text = "".join(
+                        [str(cur_acc[k]) for k in items if k in cur_acc])
+                    sq.append([str(cnt), input_feature.question,
+                               "|".join([task_cor_text, pred_sq, true_sq])])
                 except:
                     pass
             cnt += 1
 
         result_str = []
         for item in items:
-            result_str.append(item + ":{0:.1f}".format(acc[item] * 100.0 / cnt))
+            result_str.append(
+                item + ":{0:.1f}".format(acc[item] * 100.0 / cnt))
 
         result_str = ", ".join(result_str)
 
@@ -90,13 +114,16 @@ class HydraEvaluator():
                     print(text[0] + ":" + text[1] + "\t" + text[2])
             else:
                 with open(self.eval_history_file, "a+", encoding="utf8") as f:
-                    f.write("[{0}, epoch {1}] ".format(eval_file, epochs) + result_str + "\n")
+                    f.write("[{0}, epoch {1}] ".format(
+                        eval_file, epochs) + result_str + "\n")
 
                 bad_case_file = os.path.join(self.bad_case_dir,
-                                           "{0}_epoch_{1}.log".format(eval_file, epochs))
+                                             "{0}_epoch_{1}.log".format(eval_file, epochs))
                 with open(bad_case_file, "w", encoding="utf8") as f:
                     for text in sq:
-                        f.write(text[0] + ":" + text[1] + "\t" + text[2] + "\n")
+                        f.write(text[0] + ":" + text[1] +
+                                "\t" + text[2] + "\n")
+
 
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "3"
@@ -107,5 +134,6 @@ if __name__ == "__main__":
 
     featurizer = HydraFeaturizer(config)
     model = create_model(config, is_train=True, num_gpu=1)
-    evaluator = HydraEvaluator("output", config, featurizer, model, "debug evaluator")
+    evaluator = HydraEvaluator(
+        "output", config, featurizer, model, "debug evaluator")
     evaluator.eval(0)

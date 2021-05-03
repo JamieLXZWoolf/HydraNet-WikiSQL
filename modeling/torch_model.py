@@ -110,12 +110,20 @@ class HydraNet(nn.Module):
 
     def forward(self, input_ids, input_mask, segment_ids, agg=None, select=None, where=None, where_num=None, op=None, value_start=None, value_end=None):
         # print("[inner] input_ids size:", input_ids.size())
-        if self.config["base_class"] == "roberta":
+        if self.config["base_class"] in ["roberta", "grappa"]:
             bert_output, pooled_output = self.base_model(
                 input_ids=input_ids,
                 attention_mask=input_mask,
                 token_type_ids=None,
                 return_dict=False)
+        elif self.config["base_class"] == "tapas":
+            bert_output, pooled_output = self.base_model(
+                input_ids=input_ids,
+                attention_mask=input_mask,
+                token_type_ids=utils.convert_tapas_segment_ids(
+                    segment_ids).to(torch.device("cuda")),
+                return_dict=False
+            )
         else:
             bert_output, pooled_output = self.base_model(
                 input_ids=input_ids,

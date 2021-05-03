@@ -64,7 +64,8 @@ class SQLExample(object):
                  char_to_word=None,
                  word_to_char_start=None,
                  value_start_end=None,
-                 valid=True):
+                 valid=True,
+                 columns=None):
         self.qid = qid
         self.question = question
         self.table_id = table_id
@@ -73,8 +74,10 @@ class SQLExample(object):
         self.select = select
         self.conditions = conditions
         self.valid = valid
+        self.columns = columns
         if tokens is None:
-            self.tokens, self.char_to_word, self.word_to_char_start = basic_tokenize(question)
+            self.tokens, self.char_to_word, self.word_to_char_start = basic_tokenize(
+                question)
             self.value_start_end = {}
             if conditions is not None and len(conditions) > 0:
                 cur_start = None
@@ -86,7 +89,8 @@ class SQLExample(object):
                         if " ".join(self.tokens[i:i+val_len]).lower() != " ".join(value_tokens).lower():
                             continue
                         s = self.word_to_char_start[i]
-                        e = len(question) if i + val_len >= len(self.word_to_char_start) else self.word_to_char_start[i + val_len]
+                        e = len(question) if i + val_len >= len(
+                            self.word_to_char_start) else self.word_to_char_start[i + val_len]
                         recovered_answer_text = question[s:e].strip()
                         if value.lower() == recovered_answer_text.lower():
                             cur_start = i
@@ -99,14 +103,16 @@ class SQLExample(object):
                         #     print((c, ord(c), unicodedata.category(c)))
                         # raise Exception()
                     else:
-                        self.value_start_end[value] = (cur_start, cur_start + val_len)
+                        self.value_start_end[value] = (
+                            cur_start, cur_start + val_len)
         else:
             self.tokens, self.char_to_word, self.word_to_char_start, self.value_start_end = tokens, char_to_word, word_to_char_start, value_start_end
 
     @staticmethod
     def load_from_json(s):
         d = json.loads(s)
-        keys = ["qid", "question", "table_id", "column_meta", "agg", "select", "conditions", "tokens", "char_to_word", "word_to_char_start", "value_start_end", "valid"]
+        keys = ["qid", "question", "table_id", "column_meta", "agg", "select", "conditions",
+                "tokens", "char_to_word", "word_to_char_start", "value_start_end", "valid", "columns"]
 
         return SQLExample(*[d[k] for k in keys])
 
@@ -124,6 +130,7 @@ class SQLExample(object):
         d["word_to_char_start"] = self.word_to_char_start
         d["value_start_end"] = self.value_start_end
         d["valid"] = self.valid
+        d["columns"] = self.columns
 
         return json.dumps(d)
 
@@ -140,7 +147,8 @@ class SQLExample(object):
             cond_texts.append(column_text + op_text + value_text)
 
         if return_str:
-            sq = agg_text + ", " + select_text + ", " + " AND ".join(cond_texts)
+            sq = agg_text + ", " + select_text + \
+                ", " + " AND ".join(cond_texts)
         else:
             sq = (agg_text, select_text, set(cond_texts))
         return sq
@@ -148,14 +156,16 @@ class SQLExample(object):
 def get_schema(tables):
     schema, headers, colTypes, naturalMap = {}, {}, {}, {}
     for table in tables:
-        values = [set() for _ in range(len(table["header"]))]
+        values = [[] for _ in range(len(table["header"]))]
         for row in table["rows"]:
             for i, value in enumerate(row):
-                values[i].add(str(value).lower())
-        columns = {column: values[i] for i, column in enumerate(table["header"])}
+                values[i].append(str(value).lower())
+        columns = {column: values[i]
+                   for i, column in enumerate(table["header"])}
 
         trans = {"text": "string", "real": "real"}
-        colTypes[table["id"]] = {col:trans[ty] for ty, col in zip(table["types"], table["header"])}
+        colTypes[table["id"]] = {col: trans[ty]
+                                 for ty, col in zip(table["types"], table["header"])}
         schema[table["id"]] = columns
         naturalMap[table["id"]] = {col: col for col in columns}
         headers[table["id"]] = table["header"]
@@ -163,14 +173,14 @@ def get_schema(tables):
     return schema, headers, colTypes, naturalMap
 
 
-
 if __name__ == "__main__":
     data_path = os.path.join("WikiSQL", "data")
     for phase in ["train", "dev", "test"]:
         src_file = os.path.join(data_path, phase + ".jsonl")
         schema_file = os.path.join(data_path, phase + ".tables.jsonl")
-        output_file = os.path.join("data", "wiki" + phase + ".jsonl")
-        schema, headers, colTypes, naturalMap = get_schema(utils.read_jsonl(schema_file))
+        output_file = os.path.join("data", "wiki" + phase + "_content.jsonl")
+        schema, headers, colTypes, naturalMap = get_schema(
+            utils.read_jsonl(schema_file))
 
         cnt = 0
         print("processing {0}...".format(src_file))
@@ -181,18 +191,21 @@ if __name__ == "__main__":
 
                 cur_schema = schema[table_id]
                 header = headers[table_id]
-                cond_col_values = {header[cond[0]]: str(cond[2]) for cond in sql["conds"]}
+                cond_col_values = {header[cond[0]]: str(
+                    cond[2]) for cond in sql["conds"]}
                 column_meta = []
                 for col in header:
                     if col in cond_col_values:
-                        column_meta.append((col, colTypes[table_id][col], cond_col_values[col]))
+                        column_meta.append(
+                            (col, colTypes[table_id][col], cond_col_values[col]))
                     else:
                         detected_val = None
                         # for cond_col_val in cond_col_values.values():
                         #     if cond_col_val.lower() in cur_schema[col]:
                         #         detected_val = cond_col_val
                         #         break
-                        column_meta.append((col, colTypes[table_id][col], detected_val))
+                        column_meta.append(
+                            (col, colTypes[table_id][col], detected_val))
 
                 example = SQLExample(
                     cnt,
@@ -201,7 +214,9 @@ if __name__ == "__main__":
                     column_meta,
                     sql["agg"],
                     int(sql["sel"]),
-                    [(int(cond[0]), cond[1], str(cond[2])) for cond in sql["conds"]])
+                    [(int(cond[0]), cond[1], str(cond[2]))
+                     for cond in sql["conds"]],
+                    columns=cur_schema)
 
                 f.write(example.dump_to_json() + "\n")
                 cnt += 1

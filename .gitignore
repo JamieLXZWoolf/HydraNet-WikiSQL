@@ -1,0 +1,12 @@
+data/
+.vscode/
+output/
+predictions/
+zero-few-shot/
+data.tar.bz2
+__pycache__/
+res.txt
+test_all.sh
+*.txt
+tabert_models/
+conf/

@@ -8,6 +8,7 @@ from modeling.model_factory import create_model
 from featurizer import HydraFeaturizer, SQLDataset
 from evaluator import HydraEvaluator
 import torch.utils.data as torch_data
+import pickle
 
 parser = argparse.ArgumentParser(description='HydraNet training script')
 parser.add_argument("job", type=str, choices=["train"],
@@ -34,6 +35,16 @@ if args.job == "train":
     output_path = args.output_path
     model_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     model_path = os.path.join(output_path, model_name)
+    if "use_content" in config.keys() and config["use_content"] == "True":
+        processed_data_path = config["train_data_path"] +\
+            "_{}_{}_{}.pickle".format(
+                config["base_class"],
+                config["base_name"],
+                "filtered" if "filter_content" in config.keys() and config["filter_content"] == "True" else "unfilt"
+        )
+    else:
+        processed_data_path = config["train_data_path"] +\
+            "_{}_{}.pickle".format(config["base_class"], config["base_name"])
 
     if "DEBUG" not in config:
         if not os.path.exists(output_path):
@@ -52,8 +63,17 @@ if args.job == "train":
             raise Exception("model_type is not supported")
 
     featurizer = HydraFeaturizer(config)
-    train_data = SQLDataset(config["train_data_path"], config, featurizer, True)
-    train_data_loader = torch_data.DataLoader(train_data, batch_size=int(config["batch_size"]), shuffle=True, pin_memory=True)
+
+    if os.path.exists(processed_data_path):
+        train_data = pickle.load(open(processed_data_path, "rb"))
+        print("Loaded processed data from " + processed_data_path)
+    else:
+        train_data = SQLDataset(
+            config["train_data_path"], config, featurizer, True)
+        pickle.dump(train_data, open(processed_data_path, "wb"))
+        print("Unloaded processed data to " + processed_data_path)
+    train_data_loader = torch_data.DataLoader(train_data, batch_size=int(
+        config["batch_size"]), shuffle=True, pin_memory=True)
 
     num_samples = len(train_data)
     config["num_train_steps"] = int(num_samples * int(config["epochs"]) / int(config["batch_size"]))

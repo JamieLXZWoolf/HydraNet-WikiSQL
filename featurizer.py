@@ -2,10 +2,12 @@ import numpy as np
 import json
 import os
 import utils
+import pandas as pd
 import torch.utils.data as torch_data
 from wikisql_gendata import SQLExample
 from collections import defaultdict
 from typing import List
+from utils import filter_content_one_column
 
 stats = defaultdict(int)
 
@@ -93,12 +95,17 @@ class HydraFeaturizer(object):
             [],
             []
         )
-
+        
+        use_content = "use_content" in config.keys() and config["use_content"] == "True"
+        filter_content = use_content and "filter_content" in config.keys() and config["filter_content"] == True
+        contents = example.columns if use_content else None
+        
         for column, col_type, _ in example.column_meta:
             # get query tokens
             tokens = []
             word_to_subword = []
             subword_to_word = []
+            content = contents[column] if use_content else None
             for i, query_token in enumerate(example.tokens):
                 if self.config["base_class"] == "roberta":
                     sub_tokens = self.tokenizer.tokenize(query_token, add_prefix_space=True)
@@ -109,42 +116,70 @@ class HydraFeaturizer(object):
                     word_to_subword += [(cur_pos, cur_pos + len(sub_tokens))]
                     tokens.extend(sub_tokens)
                     subword_to_word.extend([i] * len(sub_tokens))
-
-            if self.config["base_class"] == "roberta":
-                tokenize_result = self.tokenizer.encode_plus(
-                    col_type + " " + column,
-                    tokens,
-                    padding="max_length",
-                    max_length=max_total_length,
-                    truncation=True,
-                    add_prefix_space=True
-                )
-            else:
-                tokenize_result = self.tokenizer.encode_plus(
-                    col_type + " " + column,
-                    tokens,
+            if filter_content:
+                content = [filter_content_one_column(self.tokenizer, example.tokens, content, 0.9)]
+            if config["base_class"] == "tapas":
+                data = {col_type + " " + column: content} if use_content else {col_type + " " + column: []}
+                tokenize_result = self.tokenizer(
+                    table=pd.DataFrame.from_dict(data),
+                    queries=" ".join(tokens),
                     max_length=max_total_length,
                     truncation_strategy="longest_first",
-                    pad_to_max_length=True,
+                    padding="max_length",
+                    return_token_type_ids=True,
+                    truncation=True,
+                    return_tensors="pt"
                 )
+                input_ids = tokenize_result["input_ids"][0].tolist()
+                segment_ids = utils.convert_tapas_token_type_ids(tokenize_result["token_type_ids"])
+                input_mask = tokenize_result["attention_mask"][0].tolist()
+                subword_to_word = [0] + subword_to_word
+                word_to_subword = [(pos[0]+1, pos[1]+1) for pos in word_to_subword]
+            else:
+                column_input = col_type + " " + column + " " + " ".join(content) if use_content else col_type + " " + column
+                if config["base_class"] == "grappa":
+                    tokenize_result = self.tokenizer.encode_plus(
+                        self.tokenizer.tokenize(column_input),
+                        tokens,
+                        padding="max_length",
+                        max_length=max_total_length,
+                        truncation=True,
+                        is_split_into_words=True
+                    )
+                elif config["base_class"] == "roberta":
+                    tokenize_result = self.tokenizer.encode_plus(
+                        column_input,
+                        tokens,
+                        padding="max_length",
+                        max_length=max_total_length,
+                        truncation=True,
+                        add_prefix_space=True
+                    )
+                else:
+                    tokenize_result = self.tokenizer.encode_plus(
+                        column_input,
+                        tokens,
+                        max_length=max_total_length,
+                        truncation_strategy="longest_first",
+                        pad_to_max_length=True,
+                    )
 
-            input_ids = tokenize_result["input_ids"]
-            input_mask = tokenize_result["attention_mask"]
+                input_ids = tokenize_result["input_ids"]
+                input_mask = tokenize_result["attention_mask"]
+                column_token_length = 0
+                for i, token_id in enumerate(input_ids):
+                    if token_id == self.tokenizer.sep_token_id:
+                        column_token_length = i + 2
+                        break
+                segment_ids = [0] * max_total_length
+                for i in range(column_token_length, max_total_length):
+                    if input_mask[i] == 0:
+                        break
+                    segment_ids[i] = 1
+                subword_to_word = [0] * column_token_length + subword_to_word
+                word_to_subword = [(pos[0]+column_token_length, pos[1]+column_token_length) for pos in word_to_subword]
 
             tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
-            column_token_length = 0
-            for i, token_id in enumerate(input_ids):
-                if token_id == self.tokenizer.sep_token_id:
-                    column_token_length = i + 2
-                    break
-            segment_ids = [0] * max_total_length
-            for i in range(column_token_length, max_total_length):
-                if input_mask[i] == 0:
-                    break
-                segment_ids[i] = 1
-
-            subword_to_word = [0] * column_token_length + subword_to_word
-            word_to_subword = [(pos[0]+column_token_length, pos[1]+column_token_length) for pos in word_to_subword]
 
             assert len(input_ids) == max_total_length
             assert len(input_mask) == max_total_length
