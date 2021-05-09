@@ -5,6 +5,9 @@ from featurizer import SQLDataset
 
 class BaseModel(object):
     """Define common interfaces for HydraNet models"""
+
+    def meta_train_one_task(self, dev_set, qry_set):
+        raise NotImplementedError()
     def train_on_batch(self, batch):
         raise NotImplementedError()
 

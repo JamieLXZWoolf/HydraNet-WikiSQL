@@ -16,6 +16,70 @@ class HydraTorch(BaseModel):
         self.model.to(self.device)
 
         self.optimizer, self.scheduler = None, None
+        if "meta_train" in config.keys() and config["meta_train"] == "True":
+            self.meta_optimizer, self.meta_scheduler = None, None
+            self.beta = config["beta"]
+
+    def meta_train_one_task(self, spt_set, qry_set):
+        if self.optimizer is None:
+            no_decay = ["bias", "LayerNorm.weight"]
+            optimizer_grouped_parameters = [
+                {
+                    "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+                    "weight_decay": float(self.config["decay"]),
+                },
+                {"params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+                 "weight_decay": 0.0},
+            ]
+            self.optimizer = transformers.AdamW(
+                optimizer_grouped_parameters, lr=float(self.config["learning_rate"]))
+            self.optimizer.zero_grad()
+        if self.meta_optimizer is None:
+            no_decay = ["bias", "LayerNorm.weight"]
+            optimizer_grouped_parameters = [
+                {
+                    "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+                    "weight_decay": float(self.config["decay"]),
+                },
+                {"params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+                 "weight_decay": 0.0},
+            ]
+            self.meta_optimizer = transformers.AdamW(
+                optimizer_grouped_parameters, lr=float(self.config["meta_learning_rate"]))
+            self.meta_optimizer.zero_grad()
+            
+        total_task_loss = 0
+        self.model.train()
+        
+        s_batch_loss = 0
+        for batch in spt_set:
+            for k, v in batch.items():
+                batch[k] = v.to(self.device)
+            s_loss = torch.mean(self.model(**batch)["loss"])
+            s_batch_loss = s_loss if s_batch_loss == 0 else s_batch_loss + s_loss
+        
+        self.optimizer.zero_grad()
+        s_batch_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
+        # self.scheduler.step()
+        
+        q_batch_loss = 0
+        for batch in qry_set:
+            for k, v in batch.items():
+                batch[k] = v.to(self.device)
+            q_loss = torch.mean(self.model(**batch)["loss"])
+            q_batch_loss = q_loss if q_batch_loss == 0 else q_batch_loss + q_loss
+        
+        total_task_loss = q_batch_loss if total_task_loss == 0 else total_task_loss + q_batch_loss
+
+        self.meta_optimizer.zero_grad()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        total_task_loss.backward()
+        self.meta_optimizer.step()
+        
+        
+        return total_task_loss.cpu().detach().numpy()
 
     def train_on_batch(self, batch):
         if self.optimizer is None:
@@ -36,6 +100,8 @@ class HydraTorch(BaseModel):
             self.optimizer.zero_grad()
 
         self.model.train()
+        if "table_id" in batch.keys():
+            del batch["table_id"]
         for k, v in batch.items():
             batch[k] = v.to(self.device)
         batch_loss = torch.mean(self.model(**batch)["loss"])

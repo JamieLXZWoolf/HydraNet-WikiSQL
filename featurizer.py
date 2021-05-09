@@ -3,6 +3,7 @@ import json
 import os
 import utils
 import pandas as pd
+import random
 import torch.utils.data as torch_data
 from wikisql_gendata import SQLExample
 from collections import defaultdict
@@ -10,6 +11,7 @@ from typing import List
 from utils import filter_content_one_column
 
 stats = defaultdict(int)
+
 
 class InputFeature(object):
     def __init__(self,
@@ -72,6 +74,7 @@ class InputFeature(object):
             sq = (agg_text, select_text, set(cond_texts))
 
         return sq
+
 
 class HydraFeaturizer(object):
     def __init__(self, config):
@@ -244,7 +247,10 @@ class HydraFeaturizer(object):
         if include_label:
             for k in ["agg", "select", "where_num", "where", "op", "value_start", "value_end"]:
                 model_inputs[k] = []
-
+         
+        column_sample = "column_sample" in config.keys() and config["column_sample"] == "True"
+        if column_sample:
+            model_inputs["table_id"] = []
         pos = []
         input_features = []
         for data_path in data_paths.split("|"):
@@ -278,6 +284,9 @@ class HydraFeaturizer(object):
                     model_inputs["op"].extend(input_feature.op)
                     model_inputs["value_start"].extend(input_feature.value_start)
                     model_inputs["value_end"].extend(input_feature.value_end)
+                if column_sample:
+                    table_ids = [input_feature.table_id for i in range(len(input_feature.input_ids))]
+                    model_inputs["table_id"].extend(table_ids)
 
                 cnt += 1
                 if cnt % 5000 == 0:
@@ -287,10 +296,101 @@ class HydraFeaturizer(object):
                     break
 
         for k in model_inputs:
-            model_inputs[k] = np.array(model_inputs[k], dtype=np.int64)
+            if k != "table_id":
+                model_inputs[k] = np.array(model_inputs[k], dtype=np.int64)
+            else:
+                model_inputs[k] = np.array(model_inputs[k])
 
         return input_features, model_inputs, pos
 
+    def load_meta_data(self, data_paths, config, include_label=True):
+        k_shot = int(config["k_shot"])
+        n_way = int(config["n_way"])
+        n_tasks = int(config["n_tasks"])
+        datas = {}
+        for data_path in data_paths.split("|"):
+            cnt = 0
+            for line in open(data_path, encoding="utf8"):
+                example = SQLExample.load_from_json(line)
+                if not example.valid and include_label == True:
+                    continue
+                if example.table_id not in datas:
+                    datas[example.table_id] = [example]
+                else:
+                    datas[example.table_id].append(example)
+                print("Loading unprocessed table-wise data...")
+                cnt += 1
+                if cnt % 5000 == 0:
+                    print(cnt)
+        
+        meta_datas_original = []
+        for i in range(n_tasks):
+            spt = []
+            tables_spt = random.sample(datas.keys(), n_way)
+            for t in tables_spt:
+                spt.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
+            qry = []
+            tables_qry = []
+            while len(tables_qry) < n_way:
+                t = random.sample(datas.keys(), 1)
+                while t[0] in tables_spt:
+                    t = random.sample(datas.keys(), 1)
+                tables_qry += t
+            for t in tables_qry:
+                qry.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
+            
+            meta_datas_original.append([spt, qry])
+        
+        def process_one_set(dataset):
+            model_inputs = {k: [] for k in ["input_ids", "input_mask", "segment_ids"]}
+            if include_label:
+                for k in ["agg", "select", "where_num", "where", "op", "value_start", "value_end"]:
+                    model_inputs[k] = []
+            pos = []
+            input_features = []
+            for example in dataset:
+                input_feature = self.get_input_feature(example, config)
+                if include_label:
+                    success = self.fill_label_feature(
+                        example, input_feature, config)
+                    if not success:
+                        continue
+                
+                # sq = input_feature.output_SQ()
+                input_features.append(input_feature)
+                
+                cur_start = len(model_inputs["input_ids"])
+                cur_sample_num = len(input_feature.input_ids)
+                pos.append((cur_start, cur_start + cur_sample_num))
+                
+                model_inputs["input_ids"].extend(input_feature.input_ids)
+                model_inputs["input_mask"].extend(input_feature.input_mask)
+                model_inputs["segment_ids"].extend(input_feature.segment_ids)
+                if include_label:
+                    model_inputs["agg"].extend(input_feature.agg)
+                    model_inputs["select"].extend(input_feature.select)
+                    model_inputs["where_num"].extend(input_feature.where_num)
+                    model_inputs["where"].extend(input_feature.where)
+                    model_inputs["op"].extend(input_feature.op)
+                    model_inputs["value_start"].extend(input_feature.value_start)
+                    model_inputs["value_end"].extend(input_feature.value_end)
+            
+            for k in model_inputs:
+              model_inputs[k] = np.array(model_inputs[k], dtype=np.int64)
+            
+            return MetaSQLDataset(input_features, model_inputs, pos)
+        
+        meta_datas_processed = []
+        cnt = 0
+        print("Processing data into column-wise format...")
+        for spt, qry in meta_datas_original:
+            meta_datas_processed.append((process_one_set(spt), process_one_set(qry)))
+            cnt += 1
+            if cnt % 500 == 0:
+                print(cnt)
+        
+        return meta_datas_processed
+    
 class SQLDataset(torch_data.Dataset):
     def __init__(self, data_paths, config, featurizer, include_label=False):
         self.config = config
@@ -307,6 +407,61 @@ class SQLDataset(torch_data.Dataset):
     def __getitem__(self, idx):
         return {k: v[idx] for k, v in self.model_inputs.items()}
 
+class MetaSQLDataset(torch_data.Dataset):
+    def __init__(self, model_inputs):
+        self.model_inputs = model_inputs
+
+    def __len__(self):
+        return self.model_inputs["input_ids"].shape[0]
+
+    def __getitem__(self, idx):
+        return {k: v[idx] for k, v in self.model_inputs.items()}
+        
+def sample_column_wise_meta_data(original_dataset: SQLDataset, config):
+    k_shot = int(config["k_shot"])
+    n_way = int(config["n_way"])
+    n_tasks = int(config["n_tasks"])
+    datas = {}
+    print("Gathering original inputs...")
+    for i in range(len(original_dataset)):
+        item = original_dataset[i]
+        if item["table_id"] not in datas:
+            datas[item["table_id"]] = [item]
+        else:
+            datas[item["table_id"]].append(item)
+    
+    meta_datas = []
+    
+    def convert_one_dataset(dataset_array):
+        model_inputs = {k: [] for k in ["input_ids", "input_mask", "segment_ids", "agg", "select", "where_num", "where", "op", "value_start", "value_end"]}
+        for item in dataset_array:
+            for k in item:
+                if k != "table_id":
+                    model_inputs[k].append(item[k])
+        for k in model_inputs:
+            model_inputs[k] = np.array(model_inputs[k], dtype=np.int64)
+        return MetaSQLDataset(model_inputs)
+    print("Sampling meta data...")
+    cnt = 0
+    for i in range(n_tasks):
+        spt = []
+        tables_spt = random.sample(datas.keys(), n_way)
+        for t in tables_spt:
+            spt.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
+        qry = []
+        tables_qry = []
+        while len(tables_qry) < n_way:
+            t = random.sample(datas.keys(), 1)
+            while t[0] in tables_spt:
+                t = random.sample(datas.keys(), 1)
+            tables_qry += t
+        for t in tables_qry:
+            qry.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
+        meta_datas.append((convert_one_dataset(spt), convert_one_dataset(qry)))
+        cnt += 1
+        if cnt % 500 == 0:
+            print(cnt)
+    return meta_datas
 
 if __name__ == "__main__":
     vocab = "vocab/baseTrue.txt"
@@ -314,15 +469,16 @@ if __name__ == "__main__":
     for line in open("conf/wikisql.conf", encoding="utf8"):
         if line.strip() == "" or line[0] == "#":
              continue
-        fields = line.strip().split("\t")
+        fields = line.strip().split()
         config[fields[0]] = fields[1]
     # config["DEBUG"] = 1
 
     featurizer = HydraFeaturizer(config)
-    train_data = SQLDataset(config["train_data_path"], config, featurizer, True)
-    train_data_loader = torch_data.DataLoader(train_data, batch_size=128, shuffle=True, pin_memory=True)
-    for batch_id, batch in enumerate(train_data_loader):
-        print(batch_id, {k: v.shape for k, v in batch.items()})
+    # train_data = SQLDataset(config["train_data_path"], config, featurizer, True)
+    # train_data_loader = torch_data.DataLoader(train_data, batch_size=128, shuffle=True, pin_memory=True)
+    # for batch_id, batch in enumerate(train_data_loader):
+    #     print(batch_id, {k: v.shape for k, v in batch.items()})
 
-    for k, v in stats.items():
-        print(k, v)
+    # for k, v in stats.items():
+    #     print(k, v)
+    meta_datas = featurizer.load_meta_data(config["train_data_path"], config, True)
