@@ -5,6 +5,7 @@ import transformers
 import utils
 from modeling.base_model import BaseModel
 from torch import nn
+from torch.utils.data.dataloader import DataLoader
 
 class HydraTorch(BaseModel):
     def __init__(self, config):
@@ -18,9 +19,8 @@ class HydraTorch(BaseModel):
         self.optimizer, self.scheduler = None, None
         if "meta_train" in config.keys() and config["meta_train"] == "True":
             self.meta_optimizer, self.meta_scheduler = None, None
-            self.beta = config["beta"]
 
-    def meta_train_one_task(self, spt_set, qry_set):
+    def meta_train_one_task(self, spt_set, qry_set, save_path):
         if self.optimizer is None:
             no_decay = ["bias", "LayerNorm.weight"]
             optimizer_grouped_parameters = [
@@ -49,37 +49,44 @@ class HydraTorch(BaseModel):
             self.meta_optimizer.zero_grad()
             
         total_task_loss = 0
-        self.model.train()
+        temp_parameter_save_path = os.path.join(save_path, "model_temp.pt")
+        self.save(save_path, "temp")
         
-        s_batch_loss = 0
-        for batch in spt_set:
-            for k, v in batch.items():
-                batch[k] = v.to(self.device)
-            s_loss = torch.mean(self.model(**batch)["loss"])
-            s_batch_loss = s_loss if s_batch_loss == 0 else s_batch_loss + s_loss
-        
-        self.optimizer.zero_grad()
-        s_batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.optimizer.step()
-        # self.scheduler.step()
-        
-        q_batch_loss = 0
-        for batch in qry_set:
-            for k, v in batch.items():
-                batch[k] = v.to(self.device)
-            q_loss = torch.mean(self.model(**batch)["loss"])
-            q_batch_loss = q_loss if q_batch_loss == 0 else q_batch_loss + q_loss
-        
-        total_task_loss = q_batch_loss if total_task_loss == 0 else total_task_loss + q_batch_loss
+        for i in range(int(self.config["n_tasks"])):
+            self.model.train()
+            s_batch_loss = 0
+            
+            spt_loader = DataLoader(dataset=spt_set[i], batch_size=int(self.config["batch_size"]), shuffle=False)
+            qry_loader = DataLoader(dataset=qry_set[i], batch_size=int(self.config["batch_size"]), shuffle=False)
+            
+            for batch in spt_loader:
+                for k, v in batch.items():
+                    batch[k] = v.to(self.device)
+                s_loss = torch.mean(self.model(**batch)["loss"])
+                s_batch_loss = s_loss if s_batch_loss == 0 else s_batch_loss + s_loss
+            
+            self.optimizer.zero_grad()
+            s_batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()
+            
+            q_batch_loss = 0
+            for batch in qry_loader:
+                for k, v in batch.items():
+                    batch[k] = v.to(self.device)
+                q_loss = torch.mean(self.model(**batch)["loss"])
+                q_batch_loss = q_loss if q_batch_loss == 0 else q_batch_loss + q_loss
+            
+            total_task_loss = q_batch_loss if total_task_loss == 0 else total_task_loss + q_batch_loss
+            self.load(save_path, "temp")
 
         self.meta_optimizer.zero_grad()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         total_task_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.meta_optimizer.step()
+        os.remove(temp_parameter_save_path)
         
-        
-        return total_task_loss.cpu().detach().numpy()
+        return (total_task_loss / int(self.config["n_tasks"])).cpu().detach().numpy() 
 
     def train_on_batch(self, batch):
         if self.optimizer is None:
@@ -140,7 +147,7 @@ class HydraTorch(BaseModel):
                 torch.save(self.model.module.state_dict(), save_path)
             else:
                 torch.save(self.model.state_dict(), save_path)
-            print("Model saved in path: %s" % save_path)
+            # print("Model saved in path: %s" % save_path)
 
     def load(self, model_path, epoch):
         pt_path = os.path.join(model_path, "model_{0}.pt".format(epoch))
@@ -149,7 +156,7 @@ class HydraTorch(BaseModel):
             self.model.module.load_state_dict(loaded_dict)
         else:
             self.model.load_state_dict(loaded_dict)
-        print("PyTorch model loaded from {0}".format(pt_path))
+        # print("PyTorch model loaded from {0}".format(pt_path))
 
 class HydraNet(nn.Module):
     def __init__(self, config):

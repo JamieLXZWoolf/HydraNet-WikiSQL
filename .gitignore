@@ -10,3 +10,4 @@ test_all.sh
 *.txt
 tabert_models/
 conf/
+WikiSQL/

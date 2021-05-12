@@ -55,7 +55,7 @@ def create_tokenizer(config):
     elif config["base_class"] == "albert":
         return transformers.AlbertTokenizer.from_pretrained(weights_name)
     elif config["base_class"] == "grappa":
-        return transformers.AutoTokenizer.from_pretrained(weights_name, add_prefix_space=True)
+        return transformers.RobertaTokenizer.from_pretrained(weights_name)
     elif config["base_class"] == "tapas":
         return transformers.TapasTokenizer.from_pretrained(weights_name)
     else:

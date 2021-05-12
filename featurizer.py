@@ -110,7 +110,7 @@ class HydraFeaturizer(object):
             subword_to_word = []
             content = contents[column] if use_content else None
             for i, query_token in enumerate(example.tokens):
-                if self.config["base_class"] == "roberta":
+                if self.config["base_class"] == ["roberta", "grappa"]:
                     sub_tokens = self.tokenizer.tokenize(query_token, add_prefix_space=True)
                 else:
                     sub_tokens = self.tokenizer.tokenize(query_token)
@@ -137,17 +137,18 @@ class HydraFeaturizer(object):
                 segment_ids = utils.convert_tapas_token_type_ids(tokenize_result["token_type_ids"])
                 input_mask = tokenize_result["attention_mask"][0].tolist()
                 subword_to_word = [0] + subword_to_word
+                for i in range(len(input_ids) - len(subword_to_word)):
+                    subword_to_word += [0]
                 word_to_subword = [(pos[0]+1, pos[1]+1) for pos in word_to_subword]
             else:
                 column_input = col_type + " " + column + " " + " ".join(content) if use_content else col_type + " " + column
                 if config["base_class"] == "grappa":
                     tokenize_result = self.tokenizer.encode_plus(
-                        self.tokenizer.tokenize(column_input),
+                        column_input,
                         tokens,
                         padding="max_length",
                         max_length=max_total_length,
                         truncation=True,
-                        is_split_into_words=True
                     )
                 elif config["base_class"] == "roberta":
                     tokenize_result = self.tokenizer.encode_plus(
@@ -183,7 +184,6 @@ class HydraFeaturizer(object):
                 word_to_subword = [(pos[0]+column_token_length, pos[1]+column_token_length) for pos in word_to_subword]
 
             tokens = self.tokenizer.convert_ids_to_tokens(input_ids)
-
             assert len(input_ids) == max_total_length
             assert len(input_mask) == max_total_length
             assert len(segment_ids) == max_total_length
@@ -302,94 +302,6 @@ class HydraFeaturizer(object):
                 model_inputs[k] = np.array(model_inputs[k])
 
         return input_features, model_inputs, pos
-
-    def load_meta_data(self, data_paths, config, include_label=True):
-        k_shot = int(config["k_shot"])
-        n_way = int(config["n_way"])
-        n_tasks = int(config["n_tasks"])
-        datas = {}
-        for data_path in data_paths.split("|"):
-            cnt = 0
-            for line in open(data_path, encoding="utf8"):
-                example = SQLExample.load_from_json(line)
-                if not example.valid and include_label == True:
-                    continue
-                if example.table_id not in datas:
-                    datas[example.table_id] = [example]
-                else:
-                    datas[example.table_id].append(example)
-                print("Loading unprocessed table-wise data...")
-                cnt += 1
-                if cnt % 5000 == 0:
-                    print(cnt)
-        
-        meta_datas_original = []
-        for i in range(n_tasks):
-            spt = []
-            tables_spt = random.sample(datas.keys(), n_way)
-            for t in tables_spt:
-                spt.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
-            qry = []
-            tables_qry = []
-            while len(tables_qry) < n_way:
-                t = random.sample(datas.keys(), 1)
-                while t[0] in tables_spt:
-                    t = random.sample(datas.keys(), 1)
-                tables_qry += t
-            for t in tables_qry:
-                qry.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
-            
-            meta_datas_original.append([spt, qry])
-        
-        def process_one_set(dataset):
-            model_inputs = {k: [] for k in ["input_ids", "input_mask", "segment_ids"]}
-            if include_label:
-                for k in ["agg", "select", "where_num", "where", "op", "value_start", "value_end"]:
-                    model_inputs[k] = []
-            pos = []
-            input_features = []
-            for example in dataset:
-                input_feature = self.get_input_feature(example, config)
-                if include_label:
-                    success = self.fill_label_feature(
-                        example, input_feature, config)
-                    if not success:
-                        continue
-                
-                # sq = input_feature.output_SQ()
-                input_features.append(input_feature)
-                
-                cur_start = len(model_inputs["input_ids"])
-                cur_sample_num = len(input_feature.input_ids)
-                pos.append((cur_start, cur_start + cur_sample_num))
-                
-                model_inputs["input_ids"].extend(input_feature.input_ids)
-                model_inputs["input_mask"].extend(input_feature.input_mask)
-                model_inputs["segment_ids"].extend(input_feature.segment_ids)
-                if include_label:
-                    model_inputs["agg"].extend(input_feature.agg)
-                    model_inputs["select"].extend(input_feature.select)
-                    model_inputs["where_num"].extend(input_feature.where_num)
-                    model_inputs["where"].extend(input_feature.where)
-                    model_inputs["op"].extend(input_feature.op)
-                    model_inputs["value_start"].extend(input_feature.value_start)
-                    model_inputs["value_end"].extend(input_feature.value_end)
-            
-            for k in model_inputs:
-              model_inputs[k] = np.array(model_inputs[k], dtype=np.int64)
-            
-            return MetaSQLDataset(input_features, model_inputs, pos)
-        
-        meta_datas_processed = []
-        cnt = 0
-        print("Processing data into column-wise format...")
-        for spt, qry in meta_datas_original:
-            meta_datas_processed.append((process_one_set(spt), process_one_set(qry)))
-            cnt += 1
-            if cnt % 500 == 0:
-                print(cnt)
-        
-        return meta_datas_processed
     
 class SQLDataset(torch_data.Dataset):
     def __init__(self, data_paths, config, featurizer, include_label=False):
@@ -422,7 +334,6 @@ def sample_column_wise_meta_data(original_dataset: SQLDataset, config):
     n_way = int(config["n_way"])
     n_tasks = int(config["n_tasks"])
     datas = {}
-    print("Gathering original inputs...")
     for i in range(len(original_dataset)):
         item = original_dataset[i]
         if item["table_id"] not in datas:
@@ -430,7 +341,8 @@ def sample_column_wise_meta_data(original_dataset: SQLDataset, config):
         else:
             datas[item["table_id"]].append(item)
     
-    meta_datas = []
+    spt_sets = []
+    qry_sets = []
     
     def convert_one_dataset(dataset_array):
         model_inputs = {k: [] for k in ["input_ids", "input_mask", "segment_ids", "agg", "select", "where_num", "where", "op", "value_start", "value_end"]}
@@ -441,8 +353,6 @@ def sample_column_wise_meta_data(original_dataset: SQLDataset, config):
         for k in model_inputs:
             model_inputs[k] = np.array(model_inputs[k], dtype=np.int64)
         return MetaSQLDataset(model_inputs)
-    print("Sampling meta data...")
-    cnt = 0
     for i in range(n_tasks):
         spt = []
         tables_spt = random.sample(datas.keys(), n_way)
@@ -457,11 +367,9 @@ def sample_column_wise_meta_data(original_dataset: SQLDataset, config):
             tables_qry += t
         for t in tables_qry:
             qry.extend(random.sample(datas[t], min(k_shot, len(datas[t]))))
-        meta_datas.append((convert_one_dataset(spt), convert_one_dataset(qry)))
-        cnt += 1
-        if cnt % 500 == 0:
-            print(cnt)
-    return meta_datas
+        spt_sets.append(convert_one_dataset(spt))
+        qry_sets.append(convert_one_dataset(qry))
+    return spt_sets, qry_sets
 
 if __name__ == "__main__":
     vocab = "vocab/baseTrue.txt"

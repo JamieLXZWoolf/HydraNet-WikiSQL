@@ -57,7 +57,6 @@ if args.job == "train":
     evaluator = HydraEvaluator(model_path, config, featurizer, model, note)
     
     is_meta = "meta_train" in config.keys() and config["meta_train"] == "True"
-    column_sample = "column_sample" in config.keys() and config["column_sample"] == "True"
     if "use_content" in config.keys() and config["use_content"] == "True":
         processed_data_path = config["train_data_path"] +\
             "_{}_{}_{}".format(
@@ -68,10 +67,8 @@ if args.job == "train":
     else:
         processed_data_path = config["train_data_path"] +\
             "_{}_{}".format(config["base_class"], config["base_name"])
-    if is_meta and not column_sample:
+    if is_meta:
         processed_data_path += "_meta_train.pickle"
-    elif column_sample:
-        processed_data_path += "_meta_column.pickle"
     else:
         processed_data_path += ".pickle"
 
@@ -79,7 +76,7 @@ if args.job == "train":
         train_data = pickle.load(open(processed_data_path, "rb"))
         print("Loaded processed data from " + processed_data_path)
     else:
-        if is_meta and not column_sample:
+        if is_meta:
             train_data = featurizer.load_meta_data(config["train_data_path"], config)
         else:
             train_data = SQLDataset(config["train_data_path"], config, featurizer, True)
@@ -88,32 +85,21 @@ if args.job == "train":
     
     if is_meta:
         print("Using meta training.")
-        if column_sample:
-            print("Meta training sample based on columns.")
-        else:
-            print("Meta training sample based on tables.")
         print("start training")
         epoch = 0
         while True:
-            if column_sample:
-                train_data_sampled = sample_column_wise_meta_data(train_data, config)
-            else:
-                train_data_sampled = train_data
-            for task_id, (spt, qry) in enumerate(train_data_sampled):
-                spt_set = torch_data.DataLoader(spt, batch_size=int(config["batch_size"]), shuffle=True, pin_memory=True)
-                qry_set = torch_data.DataLoader(qry, batch_size=int(config["batch_size"]), shuffle=True, pin_memory=True)
-                cur_loss = model.meta_train_one_task(spt_set, qry_set)
-                if task_id % 100 == 0:
-                    currentDT = datetime.datetime.now()
-                    print("[{3}] epoch {0}, task {1}, task_loss={2:.4f}".format(epoch, task_id, cur_loss,
-                                                                                  currentDT.strftime("%m-%d %H:%M:%S")))
-            if args.note:
-                print(args.note)
-            model.save(model_path, epoch)
-            evaluator.eval(epoch)
+            spt_sets, qry_sets = sample_column_wise_meta_data(train_data, config)
+            cur_loss = model.meta_train_one_task(spt_sets, qry_sets, model_path)
+            if epoch % int(int(config["epochs"]) / 50) == 0 and epoch != 0:
+                currentDT = datetime.datetime.now()
+                print("[{2}] epoch {0}, task_loss={1:.4f}".format(epoch, cur_loss, currentDT.strftime("%m-%d %H:%M:%S")))
+                if args.note:
+                    print(args.note)
+                model.save(model_path, epoch)
+                evaluator.eval(epoch)
             epoch += 1
-            if epoch >= int(config["epochs"]):
-                break       
+            if epoch >= int(int(config["epochs"])):
+                break
     else:
         print("Using normal training.")
         num_samples = len(train_data)
